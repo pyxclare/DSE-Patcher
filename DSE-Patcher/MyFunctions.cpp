@@ -124,6 +124,9 @@ static int MyModulePathMatches(const char *pFullPath,USHORT usOffset,const char 
 
 	// Substring fallback handles hidden padding or formatting differences.
 	if(MyContainsNoCase(pFullPath,szModuleName,256)) return 1;
+	if(_stricmp(szModuleName,"CI.DLL") == 0 &&
+	   MyContainsNoCase(pFullPath,"ci",256) &&
+	   MyContainsNoCase(pFullPath,".dll",256)) return 1;
 
 	// Bounded fallback in case the path buffer is not NUL-terminated.
 	return MyStringEqualsN(pFullPath,szModuleName,256);
@@ -279,7 +282,10 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		   _stricmp(pOffsetName,szModuleName) == 0 ||
 		   _stricmp(pBaseName,szModuleName) == 0 ||
 		   _stricmp(pFullPath,szModuleName) == 0 ||
-		   MyContainsNoCase(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)))
+		   MyContainsNoCase(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)) ||
+		   (_stricmp(szModuleName,"CI.DLL") == 0 &&
+		    MyContainsNoCase(pFullPath,"ci",(DWORD)sizeof(pModules->Modules[i].FullPathName)) &&
+		    MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName))))
 		{
 			// return image base and image size
 			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
@@ -377,7 +383,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v3 ci-heuristic)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
