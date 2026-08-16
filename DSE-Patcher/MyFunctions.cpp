@@ -105,6 +105,97 @@ static const char* MyModuleBaseName(const char *pPath)
 	return pBase;
 }
 
+// Match a module name against the three possible representations in a
+// fixed-size FullPathName buffer.
+static int MyModulePathMatches(const char *pFullPath,USHORT usOffset,const char *szModuleName)
+{
+	const char *pOffsetName = usOffset < 256 ? (pFullPath + usOffset) : pFullPath;
+	const char *pBaseName = MyModuleBaseName(pFullPath);
+	DWORD dwOffsetMax = usOffset < 256 ? (DWORD)(256 - usOffset) : 256;
+	DWORD dwBaseMax = (DWORD)(256 - (pBaseName - pFullPath));
+	return MyStringEqualsN(pOffsetName,szModuleName,dwOffsetMax) ||
+	       MyStringEqualsN(pBaseName,szModuleName,dwBaseMax) ||
+	       MyStringEqualsN(pFullPath,szModuleName,256);
+}
+
+static int MyContainsNoCase(const char *pHay,const char *pNeedle,DWORD dwMaxHay)
+{
+	for(DWORD i = 0; i < dwMaxHay && pHay[i] != 0; i++)
+	{
+		DWORD j = 0;
+		while(pNeedle[j] != 0 && (i + j) < dwMaxHay)
+		{
+			char a = pHay[i + j];
+			char b = pNeedle[j];
+			if(a >= 'A' && a <= 'Z') a = (char)(a + 32);
+			if(b >= 'A' && b <= 'Z') b = (char)(b + 32);
+			if(a != b) break;
+			j++;
+		}
+		if(pNeedle[j] == 0) return 1;
+	}
+	return 0;
+}
+
+static BYTE* MyLoadPeFile(const char *szPath,DWORD *pdwSize);
+
+// Return SizeOfImage for a system PE file, or 0 on failure.
+static DWORD MyGetDiskPeSizeOfImage(const char *szModuleName)
+{
+	char szPath[MAX_PATH];
+	if(GetSystemDirectory(szPath,MAX_PATH) == 0) return 0;
+	lstrcat(szPath,"\\");
+	lstrcat(szPath,szModuleName);
+
+	DWORD dwFileSize = 0;
+	BYTE *pFile = MyLoadPeFile(szPath,&dwFileSize);
+	if(pFile == NULL) return 0;
+
+	DWORD dwSizeOfImage = 0;
+	if(dwFileSize >= sizeof(IMAGE_DOS_HEADER))
+	{
+		IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)pFile;
+		if(dos->e_magic == IMAGE_DOS_SIGNATURE &&
+		   (DWORD)dos->e_lfanew <= dwFileSize &&
+		   dwFileSize - (DWORD)dos->e_lfanew >= sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD))
+		{
+			IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64*)(pFile + dos->e_lfanew);
+			WORD wMagic = *(WORD*)(pFile + (DWORD)dos->e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER));
+			if(nt->Signature == IMAGE_NT_SIGNATURE && wMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
+			   nt->FileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64) &&
+			   nt->FileHeader.SizeOfOptionalHeader <= dwFileSize - (DWORD)dos->e_lfanew - sizeof(DWORD) - sizeof(IMAGE_FILE_HEADER))
+			{
+				dwSizeOfImage = nt->OptionalHeader.SizeOfImage;
+			}
+		}
+	}
+
+	free(pFile);
+	return dwSizeOfImage;
+}
+
+// SystemModuleInformationEx (0x4C) layout for an x64 kernel. The legacy
+// SystemModuleInformation class can omit/hide some modules on newer systems;
+// the Ex class is tried as a fallback. The NextOffset field makes the record
+// stride self-describing.
+#pragma pack(push,8)
+typedef struct _RTL_PROCESS_MODULE_INFORMATION_EX64
+{
+	USHORT NextOffset;
+	USHORT Reserved;
+	RTL_PROCESS_MODULE_INFORMATION64 Base;
+	ULONG ImageCheckSum;
+	ULONG TimeDateStamp;
+	ULONG64 DefaultBase;
+}RTL_PROCESS_MODULE_INFORMATION_EX64,*PRTL_PROCESS_MODULE_INFORMATION_EX64;
+
+typedef struct _RTL_PROCESS_MODULES_EX64
+{
+	ULONG NumberOfModules;
+	RTL_PROCESS_MODULE_INFORMATION_EX64 Modules[1];
+}RTL_PROCESS_MODULES_EX64,*PRTL_PROCESS_MODULES_EX64;
+#pragma pack(pop)
+
 //------------------------------------------------------------------------------
 // get image base of module in kernel address space
 //------------------------------------------------------------------------------
@@ -186,16 +277,93 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		}
 	}
 
+	// Fallback: newer Windows builds can hide some modules from the legacy
+	// SystemModuleInformation class. Try SystemModuleInformationEx (0x4C).
+	if(*ui64ImageBase == 0)
+	{
+		#define SystemModuleInformationEx (SYSTEM_INFORMATION_CLASS)0x4C
+		ULONG ulExReturnLength = 0;
+		NtQuerySystemInformation(SystemModuleInformationEx,NULL,0,&ulExReturnLength);
+		if(ulExReturnLength >= sizeof(RTL_PROCESS_MODULES_EX64))
+		{
+			PRTL_PROCESS_MODULES_EX64 pExModules = (PRTL_PROCESS_MODULES_EX64)malloc(ulExReturnLength);
+			if(pExModules != NULL)
+			{
+				if(NtQuerySystemInformation(SystemModuleInformationEx,pExModules,ulExReturnLength,&ulExReturnLength) == 0)
+				{
+					BYTE *pExCursor = (BYTE*)pExModules->Modules;
+					BYTE *pExEnd = (BYTE*)pExModules + ulExReturnLength;
+					for(ULONG i = 0; i < pExModules->NumberOfModules && pExCursor + sizeof(RTL_PROCESS_MODULE_INFORMATION_EX64) <= pExEnd; i++)
+					{
+						PRTL_PROCESS_MODULE_INFORMATION_EX64 pEx = (PRTL_PROCESS_MODULE_INFORMATION_EX64)pExCursor;
+						if(MyModulePathMatches((const char*)pEx->Base.FullPathName,pEx->Base.OffsetToFileName,szModuleName))
+						{
+							*ui64ImageBase = (UINT64)pEx->Base.ImageBase;
+							*ulImageSize = pEx->Base.ImageSize;
+							break;
+						}
+						USHORT usNext = pEx->NextOffset;
+						if(usNext == 0 || usNext < sizeof(RTL_PROCESS_MODULE_INFORMATION_EX64)) usNext = sizeof(RTL_PROCESS_MODULE_INFORMATION_EX64);
+						pExCursor += usNext;
+					}
+				}
+				free(pExModules);
+			}
+		}
+	}
+
+	// Last fallback: some builds still enumerate protected modules but blank
+	// their FullPathName. The on-disk PE SizeOfImage is a stable fingerprint.
+	if(*ui64ImageBase == 0)
+	{
+		DWORD dwDiskSizeOfImage = MyGetDiskPeSizeOfImage(szModuleName);
+		if(dwDiskSizeOfImage != 0)
+		{
+			ULONG ulMatchIndex = 0;
+			DWORD dwMatchCount = 0;
+			for(ULONG i = 0; i < pModules->NumberOfModules; i++)
+			{
+				if(pModules->Modules[i].ImageBase != 0 && pModules->Modules[i].ImageSize == dwDiskSizeOfImage)
+				{
+					ulMatchIndex = i;
+					dwMatchCount++;
+				}
+			}
+			if(dwMatchCount == 1)
+			{
+				*ui64ImageBase = (UINT64)pModules->Modules[ulMatchIndex].ImageBase;
+				*ulImageSize = pModules->Modules[ulMatchIndex].ImageSize;
+			}
+		}
+	}
+
 	if(*ui64ImageBase == 0)
 	{
 		char szDiag[1024];
-		int iDiagLen = sprintf(szDiag,"Module '%s' not found. NumberOfModules = %lu",szModuleName,pModules->NumberOfModules);
+		DWORD dwDiskDiag = MyGetDiskPeSizeOfImage(szModuleName);
+		int iDiagLen = sprintf(szDiag,"Module '%s' not found. NumberOfModules = %lu, DiskSizeOfImage = %lu",szModuleName,pModules->NumberOfModules,dwDiskDiag);
 		for(ULONG d = 0; d < pModules->NumberOfModules && d < 8; d++)
 		{
 			const char *pDiagName = pModules->Modules[d].OffsetToFileName < sizeof(pModules->Modules[d].FullPathName) ?
 				(const char*)&pModules->Modules[d].FullPathName[pModules->Modules[d].OffsetToFileName] :
 				(const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\n[%lu] %s",d,pDiagName);
+		}
+		// Show any module whose path contains "ci" and the last few modules.
+		int iCiShown = 0;
+		for(ULONG d = 0; d < pModules->NumberOfModules && iCiShown < 8; d++)
+		{
+			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
+			if(MyContainsNoCase(pFullDiag,"ci",(DWORD)sizeof(pModules->Modules[d].FullPathName)))
+			{
+				if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nCI?[%lu] %s",d,pFullDiag);
+				iCiShown++;
+			}
+		}
+		for(ULONG d = pModules->NumberOfModules > 2 ? pModules->NumberOfModules - 2 : 0; d < pModules->NumberOfModules; d++)
+		{
+			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
+			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
 		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
