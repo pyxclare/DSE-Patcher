@@ -59,12 +59,22 @@
 // maximum number of supported driver files
 #define MAX_DRIVER_FILES 4
 
-// NtQuerySystemInformation structures
-typedef struct _RTL_PROCESS_MODULE_INFORMATION
+// NtQuerySystemInformation structures. winternl.h already typedefs the official
+// RTL_PROCESS_MODULE(S) names, so the native-x64-layout structs below use -64 names.
+//
+// NOTE: the pointer members use fixed 64-bit fields (ULONG64) on purpose.
+// NtQuerySystemInformation(SystemModuleInformation) returns the *native kernel*
+// layout, i.e. 8-byte pointers on an x64 system, regardless of whether this
+// process is a native 64-bit or a 32-bit WOW64 process (WOW64 does not convert
+// this information class). Using HANDLE/PVOID would make the structure 4 bytes
+// wide in a 32-bit build and the module enumeration would read misaligned data,
+// so _stricmp() never matches "CI.DLL" -> "Can't get image base of CI.DLL!".
+#pragma pack(push,8)
+typedef struct _RTL_PROCESS_MODULE_INFORMATION64
 {
-	HANDLE Section;
-	PVOID MappedBase;
-	PVOID ImageBase;
+	ULONG64 Section;
+	ULONG64 MappedBase;
+	ULONG64 ImageBase;
 	ULONG ImageSize;
 	ULONG Flags;
 	USHORT LoadOrderIndex;
@@ -72,13 +82,16 @@ typedef struct _RTL_PROCESS_MODULE_INFORMATION
 	USHORT LoadCount;
 	USHORT OffsetToFileName;
 	UCHAR FullPathName[256];
-}RTL_PROCESS_MODULE_INFORMATION,*PRTL_PROCESS_MODULE_INFORMATION;
+	// size assertion for this struct is below, outside the struct body
+}RTL_PROCESS_MODULE_INFORMATION64,*PRTL_PROCESS_MODULE_INFORMATION64;
+C_ASSERT(sizeof(RTL_PROCESS_MODULE_INFORMATION64) == 0x128);
 
-typedef struct _RTL_PROCESS_MODULES
+typedef struct _RTL_PROCESS_MODULES64
 {
 	ULONG NumberOfModules;
-	RTL_PROCESS_MODULE_INFORMATION Modules[1];
-}RTL_PROCESS_MODULES,*PRTL_PROCESS_MODULES;
+	RTL_PROCESS_MODULE_INFORMATION64 Modules[1];
+}RTL_PROCESS_MODULES64,*PRTL_PROCESS_MODULES64;
+#pragma pack(pop)
 
 // forward declaration of structure for use in function pointers of start and stop driver
 struct _VULNERABLE_DRIVER;

