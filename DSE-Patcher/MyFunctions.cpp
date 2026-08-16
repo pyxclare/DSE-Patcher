@@ -400,7 +400,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v4 hex)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v5 standalone)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
