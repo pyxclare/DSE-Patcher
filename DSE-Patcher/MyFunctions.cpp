@@ -375,6 +375,12 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			if(MyContainsNoCase(pFullDiag,"ci",(DWORD)sizeof(pModules->Modules[d].FullPathName)))
 			{
 				if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nCI?[%lu] %s",d,pFullDiag);
+				if(d == 21 && iDiagLen < 900)
+				{
+					iDiagLen += sprintf(szDiag + iDiagLen,"\n[21] offset=%u hex:",pModules->Modules[d].OffsetToFileName);
+					for(DWORD h = 0; h < 32 && iDiagLen < 900; h++)
+						iDiagLen += sprintf(szDiag + iDiagLen," %02X",(unsigned int)(unsigned char)pFullDiag[h]);
+				}
 				iCiShown++;
 			}
 		}
@@ -383,7 +389,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v3 ci-heuristic)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v4 hex)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
