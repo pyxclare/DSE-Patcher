@@ -2,10 +2,9 @@
 
 一个 Windows GUI 小工具，用于临时禁用 / 恢复 Windows 的「驱动签名强制」（Driver Signature Enforcement，DSE）。
 
-- 原作者：Kai Schtrom（2022）
+- 原作者：gmh5225
 - 许可证：GPLv3
 - 原项目地址：<https://github.com/gmh5225/DSE-Patcher>
-- 技术文章：CodeProject《Disable Driver Signature Enforcement with DSE-Patcher》（链接见下文）
 
 > ⚠️ **警告**
 >
@@ -48,7 +47,6 @@
 - Win32 构建改用 `/MT` 默认静态 CRT；x64 Release 继续使用内嵌的 amd64 `msvcrt.lib` 方案，免装 VC 运行库。
 
 详细改动见提交历史与 `fix/x64support` 分支的 `git diff`。
-CodeProject 文章：<https://www.codeproject.com/Articles/5348168/Disable-Driver-Signature-Enforcement-with-DSE-Patc>
 
 ---
 
