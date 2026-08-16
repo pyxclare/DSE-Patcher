@@ -280,14 +280,15 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
 		UINT64 ui64ModuleBase = pModules->Modules[i].ImageBase != 0 ?
 			(UINT64)pModules->Modules[i].ImageBase : (UINT64)pModules->Modules[i].MappedBase;
-		if(i == 21)
+		if(MyContainsNoCase(pFullPath,"ci.dll",(DWORD)sizeof(pModules->Modules[i].FullPathName)))
 		{
 			char szDbg[1024];
 			sprintf(szDbg,
-				"i=21 base=%I64X mapped=%I64X section=%I64X size=%lu\n"
+				"CI-module i=%lu base=%I64X mapped=%I64X section=%I64X size=%lu\n"
 				"off=%u\n"
 				"stricmp_off=%d stricmp_base=%d stricmp_full=%d\n"
 				"contains_full=%d contains_ci=%d contains_dll=%d contains_szCI=%d",
+				i,
 				(unsigned long long)pModules->Modules[i].ImageBase,
 				(unsigned long long)pModules->Modules[i].MappedBase,
 				(unsigned long long)pModules->Modules[i].Section,
@@ -300,7 +301,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 				MyContainsNoCase(pFullPath,"ci",(DWORD)sizeof(pModules->Modules[i].FullPathName)),
 				MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName)),
 				MyContainsNoCase(szModuleName,"CI.DLL",32));
-			MessageBox(g.Dlg1.hDialog1,szDbg,"DSE v6 debug i=21",MB_OK | MB_ICONINFORMATION);
+			MessageBox(g.Dlg1.hDialog1,szDbg,"DSE v9 debug CI module",MB_OK | MB_ICONINFORMATION);
 		}
 		// Standalone CI.DLL heuristic. This deliberately duplicates the OR
 		// clause below so a module whose path contains "ci" + ".dll" is
@@ -439,7 +440,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v8 ex-default)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v9 debug)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
