@@ -338,6 +338,11 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		#define SystemModuleInformationEx (SYSTEM_INFORMATION_CLASS)0x4C
 		ULONG ulExReturnLength = 0;
 		NtQuerySystemInformation(SystemModuleInformationEx,NULL,0,&ulExReturnLength);
+		{
+			char szExInfo[512];
+			sprintf(szExInfo,"Ex query class=0x4C: len=%lu",ulExReturnLength);
+			MessageBox(g.Dlg1.hDialog1,szExInfo,"DSE v10 Ex info",MB_OK | MB_ICONINFORMATION);
+		}
 		if(ulExReturnLength >= sizeof(RTL_PROCESS_MODULES_EX64))
 		{
 			PRTL_PROCESS_MODULES_EX64 pExModules = (PRTL_PROCESS_MODULES_EX64)malloc(ulExReturnLength);
@@ -345,6 +350,11 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			{
 				if(NtQuerySystemInformation(SystemModuleInformationEx,pExModules,ulExReturnLength,&ulExReturnLength) == 0)
 				{
+					{
+						char szExInfo2[512];
+						sprintf(szExInfo2,"Ex success: NumberOfModules=%lu len=%lu",pExModules->NumberOfModules,ulExReturnLength);
+						MessageBox(g.Dlg1.hDialog1,szExInfo2,"DSE v10 Ex success",MB_OK | MB_ICONINFORMATION);
+					}
 					BYTE *pExCursor = (BYTE*)pExModules->Modules;
 					BYTE *pExEnd = (BYTE*)pExModules + ulExReturnLength;
 					for(ULONG i = 0; i < pExModules->NumberOfModules && pExCursor + sizeof(RTL_PROCESS_MODULE_INFORMATION_EX64) <= pExEnd; i++)
@@ -440,7 +450,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v9 debug)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v10 exinfo)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
