@@ -115,11 +115,14 @@ static int MyModulePathMatches(const char *pFullPath,USHORT usOffset,const char 
 {
 	const char *pOffsetName = usOffset < 256 ? (pFullPath + usOffset) : pFullPath;
 	const char *pBaseName = MyModuleBaseName(pFullPath);
-	DWORD dwOffsetMax = usOffset < 256 ? (DWORD)(256 - usOffset) : 256;
-	DWORD dwBaseMax = (DWORD)(256 - (pBaseName - pFullPath));
-	return MyStringEqualsN(pOffsetName,szModuleName,dwOffsetMax) ||
-	       MyStringEqualsN(pBaseName,szModuleName,dwBaseMax) ||
-	       MyStringEqualsN(pFullPath,szModuleName,256);
+
+	// Primary match uses the CRT's proven case-insensitive compare, exactly
+	// like the original working x64 build did.
+	if(_stricmp(pOffsetName,szModuleName) == 0) return 1;
+	if(_stricmp(pBaseName,szModuleName) == 0) return 1;
+
+	// Bounded fallback in case the path buffer is not NUL-terminated.
+	return MyStringEqualsN(pFullPath,szModuleName,256);
 }
 
 static int MyContainsNoCase(const char *pHay,const char *pNeedle,DWORD dwMaxHay)
@@ -269,9 +272,9 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			(DWORD)(sizeof(pModules->Modules[i].FullPathName) - pModules->Modules[i].OffsetToFileName) : (DWORD)sizeof(pModules->Modules[i].FullPathName);
 		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
 		if(
-		   MyStringEqualsN(pOffsetName,szModuleName,dwOffsetMax) ||
-		   MyStringEqualsN(pBaseName,szModuleName,dwBaseMax) ||
-		   MyStringEqualsN(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)))
+		   _stricmp(pOffsetName,szModuleName) == 0 ||
+		   _stricmp(pBaseName,szModuleName) == 0 ||
+		   _stricmp(pFullPath,szModuleName) == 0)
 		{
 			// return image base and image size
 			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
