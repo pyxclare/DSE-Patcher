@@ -278,6 +278,17 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		DWORD dwOffsetMax = pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) ?
 			(DWORD)(sizeof(pModules->Modules[i].FullPathName) - pModules->Modules[i].OffsetToFileName) : (DWORD)sizeof(pModules->Modules[i].FullPathName);
 		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
+		// Standalone CI.DLL heuristic. This deliberately duplicates the OR
+		// clause below so a module whose path contains "ci" + ".dll" is
+		// accepted even if the other comparisons behave unexpectedly.
+		if(MyContainsNoCase(szModuleName,"CI.DLL",32) &&
+		   MyContainsNoCase(pFullPath,"ci",(DWORD)sizeof(pModules->Modules[i].FullPathName)) &&
+		   MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName)))
+		{
+			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
+			*ulImageSize = pModules->Modules[i].ImageSize;
+			break;
+		}
 		if(
 		   _stricmp(pOffsetName,szModuleName) == 0 ||
 		   _stricmp(pBaseName,szModuleName) == 0 ||
