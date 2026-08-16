@@ -278,6 +278,26 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		DWORD dwOffsetMax = pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) ?
 			(DWORD)(sizeof(pModules->Modules[i].FullPathName) - pModules->Modules[i].OffsetToFileName) : (DWORD)sizeof(pModules->Modules[i].FullPathName);
 		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
+		if(i == 21)
+		{
+			char szDbg[1024];
+			sprintf(szDbg,
+				"i=21 base=%I64X size=%lu\n"
+				"off=%u\n"
+				"stricmp_off=%d stricmp_base=%d stricmp_full=%d\n"
+				"contains_full=%d contains_ci=%d contains_dll=%d contains_szCI=%d",
+				(unsigned long long)pModules->Modules[i].ImageBase,
+				pModules->Modules[i].ImageSize,
+				pModules->Modules[i].OffsetToFileName,
+				_stricmp(pOffsetName,szModuleName),
+				_stricmp(pBaseName,szModuleName),
+				_stricmp(pFullPath,szModuleName),
+				MyContainsNoCase(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)),
+				MyContainsNoCase(pFullPath,"ci",(DWORD)sizeof(pModules->Modules[i].FullPathName)),
+				MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName)),
+				MyContainsNoCase(szModuleName,"CI.DLL",32));
+			MessageBox(g.Dlg1.hDialog1,szDbg,"DSE v6 debug i=21",MB_OK | MB_ICONINFORMATION);
+		}
 		// Standalone CI.DLL heuristic. This deliberately duplicates the OR
 		// clause below so a module whose path contains "ci" + ".dll" is
 		// accepted even if the other comparisons behave unexpectedly.
@@ -400,7 +420,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v5 standalone)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v6 debug)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
