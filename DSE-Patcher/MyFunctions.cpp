@@ -349,9 +349,23 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 					for(ULONG i = 0; i < pExModules->NumberOfModules && pExCursor + sizeof(RTL_PROCESS_MODULE_INFORMATION_EX64) <= pExEnd; i++)
 					{
 						PRTL_PROCESS_MODULE_INFORMATION_EX64 pEx = (PRTL_PROCESS_MODULE_INFORMATION_EX64)pExCursor;
+						if(MyContainsNoCase((const char*)pEx->Base.FullPathName,"ci.dll",256))
+						{
+							char szExDbg[512];
+							sprintf(szExDbg,"Ex i=%lu base=%I64X mapped=%I64X default=%I64X size=%lu next=%u name=%s",
+								i,
+								(unsigned long long)pEx->Base.ImageBase,
+								(unsigned long long)pEx->Base.MappedBase,
+								(unsigned long long)pEx->DefaultBase,
+								pEx->Base.ImageSize,
+								(unsigned int)pEx->NextOffset,
+								(const char*)pEx->Base.FullPathName);
+							MessageBox(g.Dlg1.hDialog1,szExDbg,"DSE Ex debug ci",MB_OK | MB_ICONINFORMATION);
+						}
 						if(MyModulePathMatches((const char*)pEx->Base.FullPathName,pEx->Base.OffsetToFileName,szModuleName))
 						{
-							*ui64ImageBase = pEx->Base.ImageBase != 0 ? (UINT64)pEx->Base.ImageBase : (UINT64)pEx->Base.MappedBase;
+							*ui64ImageBase = pEx->Base.ImageBase != 0 ? (UINT64)pEx->Base.ImageBase :
+								(pEx->Base.MappedBase != 0 ? (UINT64)pEx->Base.MappedBase : (UINT64)pEx->DefaultBase);
 							*ulImageSize = pEx->Base.ImageSize;
 							break;
 						}
@@ -425,7 +439,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v7 mappedbase)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v8 ex-default)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
