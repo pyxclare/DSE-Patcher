@@ -111,6 +111,7 @@ static const char* MyModuleBaseName(const char *pPath)
 
 // Match a module name against the three possible representations in a
 // fixed-size FullPathName buffer.
+static int MyContainsNoCase(const char *pHay,const char *pNeedle,DWORD dwMaxHay);
 static int MyModulePathMatches(const char *pFullPath,USHORT usOffset,const char *szModuleName)
 {
 	const char *pOffsetName = usOffset < 256 ? (pFullPath + usOffset) : pFullPath;
@@ -120,6 +121,9 @@ static int MyModulePathMatches(const char *pFullPath,USHORT usOffset,const char 
 	// like the original working x64 build did.
 	if(_stricmp(pOffsetName,szModuleName) == 0) return 1;
 	if(_stricmp(pBaseName,szModuleName) == 0) return 1;
+
+	// Substring fallback handles hidden padding or formatting differences.
+	if(MyContainsNoCase(pFullPath,szModuleName,256)) return 1;
 
 	// Bounded fallback in case the path buffer is not NUL-terminated.
 	return MyStringEqualsN(pFullPath,szModuleName,256);
@@ -274,7 +278,8 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		if(
 		   _stricmp(pOffsetName,szModuleName) == 0 ||
 		   _stricmp(pBaseName,szModuleName) == 0 ||
-		   _stricmp(pFullPath,szModuleName) == 0)
+		   _stricmp(pFullPath,szModuleName) == 0 ||
+		   MyContainsNoCase(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)))
 		{
 			// return image base and image size
 			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
