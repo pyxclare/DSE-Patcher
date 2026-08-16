@@ -1927,6 +1927,7 @@ void MyUpdateStaticControlWithPatchData(PATCH_DATA *pd,THREAD_TASK_NO ttno,HWND 
 }
 
 
+	int rcStep = 0;
 //------------------------------------------------------------------------------
 // thread function for better GUI interaction
 //------------------------------------------------------------------------------
@@ -2003,9 +2004,11 @@ DWORD WINAPI MyThreadProc1(PVOID pvoid)
 		SendMessage(g.Dlg1.hStatusBar1,SB_SETTEXT,(WPARAM)0,(LPARAM)"Getting image base of NTOSKRNL.EXE...");
 
 		// get image base of module NTOSKRNL.EXE in kernel address space
+		rcStep = MyGetImageBaseInKernelAddressSpace(g.pd.szModuleName,&g.pd.ui64ImageBase,&g.pd.ulImageSize);
 		if(MyGetImageBaseInKernelAddressSpace(g.pd.szModuleName,&g.pd.ui64ImageBase,&g.pd.ulImageSize) != 0)
 		{
-			MessageBox(g.Dlg1.hDialog1,"Can't get image base of NTOSKRNL.EXE!","Error",16);
+			sprintf(g.szMsg,"Can't get image base of NTOSKRNL.EXE! (error %d)",rcStep);
+			MessageBox(g.Dlg1.hDialog1,g.szMsg,"Error",16);
 			rc = 4;
 			goto cleanup;
 		}
@@ -2013,9 +2016,11 @@ DWORD WINAPI MyThreadProc1(PVOID pvoid)
 		SendMessage(g.Dlg1.hStatusBar1,SB_SETTEXT,(WPARAM)0,(LPARAM)"Getting kernel address of g_CiEnabled...");
 
 		// get g_CiEnabled kernel address
+		rcStep = MyGetg_CiEnabledKernelAddress(g.pd.ui64ImageBase,g.pd.ulImageSize,&g.pd.ui64PatchAddress);
 		if(MyGetg_CiEnabledKernelAddress(g.pd.ui64ImageBase,g.pd.ulImageSize,&g.pd.ui64PatchAddress) != 0)
 		{
-			MessageBox(g.Dlg1.hDialog1,"Can't get kernel address of g_CiEnabled!","Error",16);
+			sprintf(g.szMsg,"Can't get kernel address of g_CiEnabled! (error %d)",rcStep);
+			MessageBox(g.Dlg1.hDialog1,g.szMsg,"Error",16);
 			rc = 5;
 			goto cleanup;
 		}
@@ -2037,9 +2042,11 @@ DWORD WINAPI MyThreadProc1(PVOID pvoid)
 		SendMessage(g.Dlg1.hStatusBar1,SB_SETTEXT,(WPARAM)0,(LPARAM)"Getting image base of CI.DLL...");
 
 		// get image base of module CI.DLL in kernel address space
+		rcStep = MyGetImageBaseInKernelAddressSpace(g.pd.szModuleName,&g.pd.ui64ImageBase,&g.pd.ulImageSize);
 		if(MyGetImageBaseInKernelAddressSpace(g.pd.szModuleName,&g.pd.ui64ImageBase,&g.pd.ulImageSize) != 0)
 		{
-			MessageBox(g.Dlg1.hDialog1,"Can't get image base of CI.DLL!","Error",16);
+			sprintf(g.szMsg,"Can't get image base of CI.DLL! (error %d)",rcStep);
+			MessageBox(g.Dlg1.hDialog1,g.szMsg,"Error",16);
 			rc = 6;
 			goto cleanup;
 		}
@@ -2047,9 +2054,11 @@ DWORD WINAPI MyThreadProc1(PVOID pvoid)
 		SendMessage(g.Dlg1.hStatusBar1,SB_SETTEXT,(WPARAM)0,(LPARAM)"Getting kernel address of g_CiOptions...");
 
 		// get g_CiOptions kernel address
+		rcStep = MyGetg_CiOptionsKernelAddress(g.pd.ui64ImageBase,&g.pd.ui64PatchAddress,osvi.dwBuildNumber);
 		if(MyGetg_CiOptionsKernelAddress(g.pd.ui64ImageBase,&g.pd.ui64PatchAddress,osvi.dwBuildNumber) != 0)
 		{
-			MessageBox(g.Dlg1.hDialog1,"Can't get kernel address of g_CiOptions!","Error",16);
+			sprintf(g.szMsg,"Can't get kernel address of g_CiOptions! (error %d)",rcStep);
+			MessageBox(g.Dlg1.hDialog1,g.szMsg,"Error",16);
 			rc = 7;
 			goto cleanup;
 		}
