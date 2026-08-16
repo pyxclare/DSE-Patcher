@@ -1,0 +1,54 @@
+name: Build DSE-Patcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: '选择要构建的平台'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - Win32
+      configuration:
+        description: '构建配置'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+  push:
+    branches:
+      - fix/x64support
+  pull_request:
+    branches:
+      - fix/x64support
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        shell: cmd
+        env:
+          CONFIGURATION: ${{ github.event.inputs.configuration || 'Release' }}
+          PLATFORM: ${{ github.event.inputs.platform || 'x64' }}
+        run: |
+          msbuild DSE-Patcher.sln /m /p:Configuration=%CONFIGURATION% /p:Platform=%PLATFORM% /p:PlatformToolset=v143
+
+      - name: Upload artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSE-Patcher-${{ github.event.inputs.configuration || 'Release' }}-${{ github.event.inputs.platform || 'x64' }}
+          path: |
+            **/DSE-Patcher.exe
