@@ -88,7 +88,11 @@ static int MyStringEqualsN(const char *a,const char *b,DWORD maxA)
 {
 	for(DWORD i = 0; i < maxA; i++)
 	{
-		if(a[i] != b[i]) return 0;
+		char ca = a[i];
+		char cb = b[i];
+		if(ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+		if(cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+		if(ca != cb) return 0;
 		if(a[i] == 0) return 1;
 	}
 	return 0;
