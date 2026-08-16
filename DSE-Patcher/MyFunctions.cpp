@@ -82,6 +82,29 @@ int MyRtlGetVersion(RTL_OSVERSIONINFOW *osvi)
 }
 
 
+// Bounded, case-insensitive comparison of two zero-terminated names. maxA
+// limits how far we may read into a.
+static int MyStringEqualsN(const char *a,const char *b,DWORD maxA)
+{
+	for(DWORD i = 0; i < maxA; i++)
+	{
+		if(a[i] != b[i]) return 0;
+		if(a[i] == 0) return 1;
+	}
+	return 0;
+}
+
+// Return the basename inside a fixed-size module path buffer.
+static const char* MyModuleBaseName(const char *pPath)
+{
+	const char *pBase = pPath;
+	for(DWORD i = 0; i < 256 && pPath[i] != 0; i++)
+	{
+		if(pPath[i] == '\\' && (i + 1) < 256) pBase = pPath + i + 1;
+	}
+	return pBase;
+}
+
 //------------------------------------------------------------------------------
 // get image base of module in kernel address space
 //------------------------------------------------------------------------------
@@ -143,8 +166,17 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 	for(ULONG i = 0; i < pModules->NumberOfModules; i++)
 	{
 		// check if module name matches our first function argument
-		if(pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) &&
-		   _stricmp((const char*)&pModules->Modules[i].FullPathName[pModules->Modules[i].OffsetToFileName],szModuleName) == 0)
+		const char *pFullPath = (const char*)pModules->Modules[i].FullPathName;
+		const char *pOffsetName = pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) ?
+			(pFullPath + pModules->Modules[i].OffsetToFileName) : pFullPath;
+		const char *pBaseName = MyModuleBaseName(pFullPath);
+		DWORD dwOffsetMax = pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) ?
+			(DWORD)(sizeof(pModules->Modules[i].FullPathName) - pModules->Modules[i].OffsetToFileName) : (DWORD)sizeof(pModules->Modules[i].FullPathName);
+		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
+		if(
+		   MyStringEqualsN(pOffsetName,szModuleName,dwOffsetMax) ||
+		   MyStringEqualsN(pBaseName,szModuleName,dwBaseMax) ||
+		   MyStringEqualsN(pFullPath,szModuleName,(DWORD)sizeof(pModules->Modules[i].FullPathName)))
 		{
 			// return image base and image size
 			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
@@ -154,6 +186,21 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		}
 	}
 
+	if(*ui64ImageBase == 0)
+	{
+		char szDiag[1024];
+		int iDiagLen = sprintf(szDiag,"Module '%s' not found. NumberOfModules = %lu",szModuleName,pModules->NumberOfModules);
+		for(ULONG d = 0; d < pModules->NumberOfModules && d < 8; d++)
+		{
+			const char *pDiagName = pModules->Modules[d].OffsetToFileName < sizeof(pModules->Modules[d].FullPathName) ?
+				(const char*)&pModules->Modules[d].FullPathName[pModules->Modules[d].OffsetToFileName] :
+				(const char*)pModules->Modules[d].FullPathName;
+			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\n[%lu] %s",d,pDiagName);
+		}
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic",MB_OK | MB_ICONINFORMATION);
+		free(pModules);
+		return 5;
+	}
 	// free system module information memory
 	free(pModules);
 
