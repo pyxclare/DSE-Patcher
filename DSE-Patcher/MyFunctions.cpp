@@ -278,15 +278,19 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		DWORD dwOffsetMax = pModules->Modules[i].OffsetToFileName < sizeof(pModules->Modules[i].FullPathName) ?
 			(DWORD)(sizeof(pModules->Modules[i].FullPathName) - pModules->Modules[i].OffsetToFileName) : (DWORD)sizeof(pModules->Modules[i].FullPathName);
 		DWORD dwBaseMax = (DWORD)(sizeof(pModules->Modules[i].FullPathName) - (pBaseName - pFullPath));
+		UINT64 ui64ModuleBase = pModules->Modules[i].ImageBase != 0 ?
+			(UINT64)pModules->Modules[i].ImageBase : (UINT64)pModules->Modules[i].MappedBase;
 		if(i == 21)
 		{
 			char szDbg[1024];
 			sprintf(szDbg,
-				"i=21 base=%I64X size=%lu\n"
+				"i=21 base=%I64X mapped=%I64X section=%I64X size=%lu\n"
 				"off=%u\n"
 				"stricmp_off=%d stricmp_base=%d stricmp_full=%d\n"
 				"contains_full=%d contains_ci=%d contains_dll=%d contains_szCI=%d",
 				(unsigned long long)pModules->Modules[i].ImageBase,
+				(unsigned long long)pModules->Modules[i].MappedBase,
+				(unsigned long long)pModules->Modules[i].Section,
 				pModules->Modules[i].ImageSize,
 				pModules->Modules[i].OffsetToFileName,
 				_stricmp(pOffsetName,szModuleName),
@@ -305,7 +309,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		   MyContainsNoCase(pFullPath,"ci",(DWORD)sizeof(pModules->Modules[i].FullPathName)) &&
 		   MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName)))
 		{
-			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
+			*ui64ImageBase = ui64ModuleBase;
 			*ulImageSize = pModules->Modules[i].ImageSize;
 			break;
 		}
@@ -319,7 +323,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 		    MyContainsNoCase(pFullPath,".dll",(DWORD)sizeof(pModules->Modules[i].FullPathName))))
 		{
 			// return image base and image size
-			*ui64ImageBase = (UINT64)pModules->Modules[i].ImageBase;
+			*ui64ImageBase = ui64ModuleBase;
 			*ulImageSize = pModules->Modules[i].ImageSize;
 			// leave for loop
 			break;
@@ -347,7 +351,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 						PRTL_PROCESS_MODULE_INFORMATION_EX64 pEx = (PRTL_PROCESS_MODULE_INFORMATION_EX64)pExCursor;
 						if(MyModulePathMatches((const char*)pEx->Base.FullPathName,pEx->Base.OffsetToFileName,szModuleName))
 						{
-							*ui64ImageBase = (UINT64)pEx->Base.ImageBase;
+							*ui64ImageBase = pEx->Base.ImageBase != 0 ? (UINT64)pEx->Base.ImageBase : (UINT64)pEx->Base.MappedBase;
 							*ulImageSize = pEx->Base.ImageSize;
 							break;
 						}
@@ -372,7 +376,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			DWORD dwMatchCount = 0;
 			for(ULONG i = 0; i < pModules->NumberOfModules; i++)
 			{
-				if(pModules->Modules[i].ImageBase != 0 && pModules->Modules[i].ImageSize == dwDiskSizeOfImage)
+				if((pModules->Modules[i].ImageBase != 0 || pModules->Modules[i].MappedBase != 0) && pModules->Modules[i].ImageSize == dwDiskSizeOfImage)
 				{
 					ulMatchIndex = i;
 					dwMatchCount++;
@@ -380,7 +384,8 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			}
 			if(dwMatchCount == 1)
 			{
-				*ui64ImageBase = (UINT64)pModules->Modules[ulMatchIndex].ImageBase;
+				*ui64ImageBase = pModules->Modules[ulMatchIndex].ImageBase != 0 ?
+					(UINT64)pModules->Modules[ulMatchIndex].ImageBase : (UINT64)pModules->Modules[ulMatchIndex].MappedBase;
 				*ulImageSize = pModules->Modules[ulMatchIndex].ImageSize;
 			}
 		}
@@ -420,7 +425,7 @@ int MyGetImageBaseInKernelAddressSpace(const char *szModuleName,UINT64 *ui64Imag
 			const char *pFullDiag = (const char*)pModules->Modules[d].FullPathName;
 			if(iDiagLen < 900) iDiagLen += sprintf(szDiag + iDiagLen,"\nlast[%lu] %s",d,pFullDiag);
 		}
-		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v6 debug)",MB_OK | MB_ICONINFORMATION);
+		MessageBox(g.Dlg1.hDialog1,szDiag,"DSE-Patcher module enumeration diagnostic (v7 mappedbase)",MB_OK | MB_ICONINFORMATION);
 		free(pModules);
 		return 5;
 	}
